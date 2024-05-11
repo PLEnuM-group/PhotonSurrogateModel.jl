@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "PhotonSurrogateModel"
+version = "0.1.0"
+authors = [
+  { name="Christian Haack", email="chr.hck@gmail.com" },
+]
+description = "Photon surrogate model for neutrino telescopes"
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: BSD License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "juliacall"
+    ]
+
+[project.urls]
+Homepage = "https://github.com/PLEnuM-group/PhotonSurrogateModel.jl"
+Issues = "https://github.com/PLEnuM-group/PhotonSurrogateModel.jl/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["python/photonsurrogatemodel"]
+
+[tool.hatch.envs.<ENV_NAME>]
+type = "conda"
