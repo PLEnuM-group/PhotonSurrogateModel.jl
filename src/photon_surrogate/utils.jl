@@ -893,47 +893,6 @@ function sample_multi_particle_event_new!(
     return output_buffer
 end
 
-#=
-function sample_multi_particle_event!(
-    particles,
-    targets,
-    model,
-    medium,
-    rng=Random.default_rng();
-    feat_buffer,
-    output_buffer,
-    oversample=1,
-    device=gpu,
-    abs_scale=1.,
-    sca_scale=1.,
-    noise_rate=1E4,
-    time_window=1E4,
-    max_distance=200)
-
-    if device == gpu
-        func = sample_multi_particle_event_gpu!
-    else
-        func = sample_multi_particle_event_cpu!
-    end
-
-    return func(
-        particles,
-        targets,
-        model,
-        medium,
-        rng;
-        feat_buffer,
-        output_buffer,
-        oversample=oversample,
-        device=device,
-        abs_scale=abs_scale,
-        sca_scale=sca_scale,
-        noise_rate=noise_rate,
-        time_window=time_window,
-        max_distance=max_distance)
-end
-=#
-
 const sample_multi_particle_event! = sample_multi_particle_event_new!
 
 

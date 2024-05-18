@@ -7,3 +7,17 @@
 
 This package provides a surrogate model for modelling photon arrival time distributions for neutrino telescopes.
 For an example see `examples/plot_surrogate_model.ipynb`.
+
+## Installation
+
+This package is registered in the PLEnuM julia package [registry](https://github.com/PLEnuM-group/julia-registry). In order to use this registry run:
+```{julia}
+using Pkg
+pkg"registry add https://github.com/PLEnuM-group/julia-registry"
+```
+
+Then install the package:
+```{julia}
+using Pkg
+pkg"add PhotonSurrogateModel"
+```
