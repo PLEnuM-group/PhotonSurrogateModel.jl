@@ -2,6 +2,7 @@ using Flux
 using PhotonSurrogateModel
 using BSON: @load, parse, raise_recursive, bson
 using Glob
+using NeutrinoTelescopes
 function fix_amp_model(fname)
 
     data = parse(fname)
@@ -68,3 +69,22 @@ for time_model in time_models
     fix_time_model(time_model)
 end
 
+
+function fix_fisher_per_line(fname)
+    model_file = fname
+    data = parse(model_file)
+
+    tf_in = data[:tf_in]
+    tf_in[:type][:name] = ["PhotonSurrogateModel", "Normalizer"]
+
+
+    tf_out = data[:tf_out]
+    tf_out[:type][:name] = ["PhotonSurrogateModel", "Normalizer"]
+
+    fixed_data = raise_recursive(data, Main)
+
+    rm(model_file)
+    bson(fname, fixed_data)
+end
+
+fix_fisher_per_line("/home/wecapstor3/capn/capn100h/snakemake/fisher_surrogates/fisher_surrogate_per_string_lightsabre.bson")
