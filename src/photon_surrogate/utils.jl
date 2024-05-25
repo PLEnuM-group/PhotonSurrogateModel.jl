@@ -29,6 +29,7 @@ using LinearAlgebra
 using LogExpFunctions
 using PoissonRandom
 using ..RQSplineFlow
+using CUDA
 
 struct Normalizer{T}
     mean::T
@@ -831,10 +832,19 @@ function sample_multi_particle_event_new!(
     create_model_input!(model.time_model, t_p_vectors, shape_buffer, abs_scale=abs_scale, sca_scale=sca_scale)
 
     # [particle, pmt, target]
-    input = shape_buffer
 
-    flow_params = cpu(model.time_model.embedding(device(input)))
-   
+    nrows = size(shape_buffer, 2)
+    if nrows > 1E6
+        n_out = 3 * model.time_model.K + 1 + 2
+        flow_params = Array{Float32}(undef, n_out, nrows)
+        for subindices in partition(1:nrows, Int64(1E6))
+            flow_params[:, subindices] .= cpu(model.time_model.embedding(device(shape_buffer[:, subindices])))
+        end
+    else
+        flow_params = cpu(model.time_model.embedding(device(shape_buffer)))
+    end
+
+    
 
     if sum(n_hits_per_pmt_source) > 1E6
         println("Warning: More than 1E6 hits will be generated. This may be slow.")
