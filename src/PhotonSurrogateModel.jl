@@ -16,5 +16,8 @@ include("photon_surrogate/dataio.jl")
 include("photon_surrogate/time_models.jl")
 include("photon_surrogate/amplitude_models.jl")
 
+include("analytic_surrogate/amplitude.jl")
+
+include("fisher_information.jl")
 
 end

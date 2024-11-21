@@ -1,15 +1,19 @@
-export Normalizer, fit_normalizer!
+export Normalizer, fit_transformation!
+export UnitRangeScaler
 export create_mlp_embedding, create_resnet_embedding
 export arrival_time_log_likelihood, log_likelihood_with_poisson
 export create_model_input!
-export apply_normalizer
-export kfold_train_model
+export train_model!
+export apply_transformation
 export sample_multi_particle_event!
 export get_log_amplitudes
 export evaluate_model
 export multi_particle_likelihood
 export create_input_buffer, create_output_buffer
+export setup_training
+export fourier_input_mapping
 
+using AbstractMediumProperties
 using ArraysOfArrays
 using Flux
 using Random
@@ -31,24 +35,40 @@ using PoissonRandom
 using ..RQSplineFlow
 using CUDA
 
-struct Normalizer{T}
+const NON_LINS = Dict("relu" => relu, "tanh" => tanh, "gelu" => gelu)
+
+
+abstract type Transformation end
+
+struct Normalizer{T} <: Transformation
     mean::T
     σ::T
+end
+
+struct UnitRangeScaler{T} <: Transformation
+    min_val::T
+    max_val::T
 end
 
 Normalizer(x::AbstractVector) = Normalizer(mean(x), std(x))
 (norm::Normalizer)(x::Number) = (x - norm.mean) / norm.σ
 Base.inv(n::Normalizer) = x -> x*n.σ + n.mean
-
 Base.convert(::Type{Normalizer{T}}, n::Normalizer) where {T<:Real} = Normalizer(T(n.mean), T(n.σ))
 
-function fit_normalizer!(x::AbstractVector)
-    tf = Normalizer(x)
+
+UnitRangeScaler(x::AbstractVector) = UnitRangeScaler(minimum(x), maximum(x))
+(traf::UnitRangeScaler)(x::Number) = (x - traf.min_val) / (traf.max_val - traf.min_val)
+Base.inv(traf::UnitRangeScaler) = x -> x*(traf.max_val - traf.min_val) + traf.min_val
+Base.convert(::Type{UnitRangeScaler{T}}, n::UnitRangeScaler) where {T<:Real} = UnitRangeScaler(T(n.min_val), T(n.max_val))
+
+
+function fit_transformation!(trafo_type::Type{<:Transformation}, x::AbstractVector)
+    tf = trafo_type(x)
     x .= tf.(x)
     return x, tf
 end
 
-function apply_normalizer(m, tf_vec)
+function apply_transformation(m, tf_vec)
     # Not mutating version...
     tf_matrix = mapreduce(
         t -> permutedims(t[2].(t[1])),
@@ -58,7 +78,7 @@ function apply_normalizer(m, tf_vec)
     return tf_matrix
 end
 
-function apply_normalizer(m, tf_vec, output)
+function apply_transformation!(m, tf_vec, output)
     # Mutating version...
     for (in_row, out_row, tf) in zip(eachrow(m), eachrow(output), tf_vec)
         out_row .= tf.(in_row)
@@ -66,10 +86,10 @@ function apply_normalizer(m, tf_vec, output)
     return output
 end
 
-function fit_normalizer!(x::AbstractMatrix)
+function fit_transformation!(x::AbstractMatrix)
     tf_vec = Vector{Normalizer{Float64}}(undef, size(x, 1))
     for (row, ix) in zip(eachrow(x), eachindex(tf_vec))
-        row, tf = fit_normalizer!(row)
+        row, tf = fit_transformation!(row)
         tf_vec[ix] = tf
     end
 
@@ -105,6 +125,22 @@ end
 
 abstract type PhotonSurrogate end
 
+
+struct PhotonSurrogateAmplitude{A<:AmplitudeSurrogate} <: PhotonSurrogate
+    model::A
+end
+
+function PhotonSurrogateAmplitude(fname_amp)
+
+    b1 = load(fname_amp)
+    amp_model = b1[:model]
+
+    Flux.testmode!(amp_model)
+
+    return PhotonSurrogateAmplitude(amp_model)
+end
+
+
 """
     struct PhotonSurrogateWithPerturb <: PhotonSurrogate
 
@@ -112,9 +148,7 @@ PhotonSurrogateWithPerturb is a struct that represents a photon surrogate model 
 
 # Fields
 - `amp_model::AmplitudeSurrogate`: The amplitude model of the surrogate.
-- `amp_transformations::Vector{Normalizer}`: The amplitude transformations applied to the surrogate.
 - `time_model::ArrivalTimeSurrogate`: The time model of the surrogate.
-- `time_transformations::Vector{Normalizer}`: The time transformations applied to the surrogate.
 """
 struct PhotonSurrogateWithPerturb{A<:AmplitudeSurrogate, T<:ArrivalTimeSurrogate} <: PhotonSurrogate
     amp_model::A
@@ -128,9 +162,7 @@ The `PhotonSurrogateWithoutPerturb` struct represents a photon surrogate model w
 
 # Fields
 - `amp_model::AmplitudeSurrogate`: The amplitude model for the surrogate.
-- `amp_transformations::Vector{Normalizer}`: The amplitude transformations applied to the surrogate.
 - `time_model::ArrivalTimeSurrogate`: The time model for the surrogate.
-- `time_transformations::Vector{Normalizer}`: The time transformations applied to the surrogate.
 """
 struct PhotonSurrogateWithoutPerturb{A<:AmplitudeSurrogate, T<:ArrivalTimeSurrogate} <: PhotonSurrogate
     amp_model::A
@@ -280,30 +312,41 @@ function create_resnet_embedding(;
 end
 
 
+function log_likelihood_with_poisson(tres, nhits, labels, model::ArrivalTimeSurrogate)
+
+    logpdf_eval, log_expec = model(tres, labels)
+    non_zero_mask = nhits .> 0
+    logpdf_eval = logpdf_eval .* non_zero_mask
+
+    # poisson: log(exp(-lambda) * lambda^k)
+    poiss_f = nhits .* log_expec .- exp.(log_expec) .- loggamma.(nhits .+ 1.0)
+
+    # sets correction to nhits of nhits > 0 and to 0 for nhits == 0
+    # avoids nans
+    correction = nhits .+ (.!non_zero_mask)
+
+    # correct for overcounting the poisson factor
+    poiss_f = poiss_f ./ correction
+
+    return -(sum(logpdf_eval) + sum(poiss_f)) / length(tres)
+end
+
 """
     log_likelihood_with_poisson(x::NamedTuple, model::RQNormFlow)
 
 Evaluate model and return sum of logpdfs of normalizing flow and poisson
 """
 function log_likelihood_with_poisson(x::NamedTuple, model::ArrivalTimeSurrogate)
-
-    logpdf_eval, log_expec = model(x[:tres], x[:label])
-    non_zero_mask = x[:nhits] .> 0
-    logpdf_eval = logpdf_eval .* non_zero_mask
-
-    # poisson: log(exp(-lambda) * lambda^k)
-    poiss_f = x[:nhits] .* log_expec .- exp.(log_expec) .- loggamma.(x[:nhits] .+ 1.0)
-
-    # sets correction to nhits of nhits > 0 and to 0 for nhits == 0
-    # avoids nans
-    correction = x[:nhits] .+ (.!non_zero_mask)
-
-    # correct for overcounting the poisson factor
-    poiss_f = poiss_f ./ correction
-
-    return -(sum(logpdf_eval) + sum(poiss_f)) / length(x[:tres])
+    return log_likelihood_with_poisson(x[:tres], x[:nhits], x[:label], model)
 end
 
+
+
+
+function arrival_time_log_likelihood(tres, labels, model::ArrivalTimeSurrogate)
+    logpdf_eval = model(tres, labels)
+    return -sum(logpdf_eval) / length(tres)
+end
 
 """
 log_likelihood(x::NamedTuple, model::ArrivalTimeSurrogate)
@@ -311,9 +354,9 @@ log_likelihood(x::NamedTuple, model::ArrivalTimeSurrogate)
 Evaluate model and return sum of logpdfs of normalizing flow
 """
 function arrival_time_log_likelihood(x::NamedTuple, model::ArrivalTimeSurrogate)
-    logpdf_eval = model(x[:tres], x[:label])
-    return -sum(logpdf_eval) / length(x[:tres])
+    return arrival_time_log_likelihood(x[:tres], x[:label], model)
 end
+
 
 
 """
@@ -364,7 +407,7 @@ function setup_dataloaders(train_data, test_data, seed::Integer, batch_size::Int
 
     test_loader = DataLoader(
         test_data,
-        batchsize=50000,
+        batchsize=min(50000, numobs(test_data)),
         shuffle=false)
 
     return train_loader, test_loader
@@ -423,7 +466,6 @@ function setup_optimizer(hparams)
     if hparams.l2_norm_alpha > 0
         opt = OptimiserChain(WeightDecay(hparams.l2_norm_alpha), opt)
     end
-
     return opt
 end
 
@@ -488,7 +530,6 @@ function train_model!(;
     best_test_epoch = 0
 
     t = time()
-    @show length(train_loader)
     @progress for epoch in 1:hparams.epochs
         Flux.trainmode!(model)
 
@@ -505,11 +546,13 @@ function train_model!(;
 
         total_train_loss /= length(train_loader)
 
+        eta = nothing
         if !isnothing(schedule)
             eta = next!(schedule)
             Flux.adjust!(optimizer, eta)
         end
 
+    
         Flux.testmode!(model)
         total_test_loss = 0
         for d in test_loader
@@ -523,7 +566,7 @@ function train_model!(;
 
         if !isnothing(logger)
             with_logger(logger) do
-                @info "loss" train = total_train_loss test = total_test_loss
+                @info "loss" train = total_train_loss test = total_test_loss lr = eta
                 #@info "model" params = param_dict log_step_increment = 0
             end
 
@@ -542,49 +585,19 @@ function train_model!(;
     return model, total_test_loss, best_test, best_test_epoch, time() - t
 end
 
-function kfold_train_model(data, outpath, model_name, tf_vec, n_folds, hparams::HyperParams, logdir)
-       
 
-    model_stats = []
+function setup_training(model, train_data, val_data, hparams, logdir)
+    lg = TBLogger(logdir)
+    train_loader, test_loader = setup_dataloaders(train_data, val_data, hparams)
+    opt = setup_optimizer(hparams)
+    schedule = Stateful(CosAnneal(λ0=hparams.lr_min, λ1=hparams.lr, period=hparams.epochs))
 
-    for (model_num, (train_data, val_data)) in enumerate(kfolds(shuffleobs(data); k=n_folds))
-        gc()
-        lg = TBLogger(logdir)
-        model, loss_f = setup_model(hparams, tf_vec)
-        model = gpu(model)
-        chk_path = joinpath(outpath, "$(model_name)_$(model_num)")
+    opt_state = Flux.setup(opt, model)
 
-        train_loader, test_loader = setup_dataloaders(train_data, val_data, hparams)
-        opt = setup_optimizer(hparams)
-        schedule = Stateful(CosAnneal(λ0=hparams.lr_min, λ1=hparams.lr, period=hparams.epochs))
-
-        opt_state = Flux.setup(opt, model)
-
-        device = gpu
-        model, final_test_loss, best_test_loss, best_test_epoch, time_elapsed = train_model!(
-            optimizer=opt_state,
-            train_loader=train_loader,
-            test_loader=test_loader,
-            model=model,
-            loss_function=loss_f,
-            hparams=hparams,
-            logger=lg,
-            device=device,
-            use_early_stopping=false,
-            checkpoint_path=chk_path,
-            schedule=schedule)
-
-        model_path = joinpath(outpath, "$(model_name)_$(model_num)_FNL.bson")
-        model = cpu(model)
-        @save model_path model hparams tf_vec
-
-        push!(model_stats, (model_num=model_num, final_test_loss=final_test_loss))
-    end
-
-    model_stats = DataFrame(model_stats)
-    return model_stats
-
+    return opt_state, train_loader, test_loader, lg, schedule
 end
+
+
 
 function create_model_input!(
     particle_pos,
@@ -832,12 +845,13 @@ function sample_multi_particle_event_new!(
     create_model_input!(model.time_model, t_p_vectors, shape_buffer, abs_scale=abs_scale, sca_scale=sca_scale)
 
     # [particle, pmt, target]
-
+    max_batch_size = Int64(5E5)
     nrows = size(shape_buffer, 2)
-    if nrows > 1E6
+    if nrows > max_batch_size
+        println("More than $(max_batch_size) emitter/receiver pairs. Batching")
         n_out = 3 * model.time_model.K + 1 + 2
-        flow_params = Array{Float32}(undef, n_out, nrows)
-        for subindices in partition(1:nrows, Int64(1E6))
+        flow_params = Array{Float32}(undef, (n_out, Int64(nrows)))
+        for subindices in partition(1:nrows, max_batch_size)
             flow_params[:, subindices] .= cpu(model.time_model.embedding(device(shape_buffer[:, subindices])))
         end
     else
@@ -1266,8 +1280,39 @@ function create_input_buffer(model::PhotonSurrogate, n_det::Integer, max_particl
     return create_input_buffer(input_size, n_det, max_particles)
 end
 
+function create_input_buffer(model::PhotonSurrogateAmplitude, n_det::Integer, max_particles=500)
+    input_size = size(model.model.embedding.layers[1].weight, 2)
+    return create_input_buffer(input_size, n_det, max_particles)
+end
+
 function create_output_buffer(n_det::Integer, expected_hits_per=100)
     buffer = VectorOfArrays{Float64, 1}()
     sizehint!(buffer, n_det, (expected_hits_per, ))
     return buffer
+end
+
+"""
+    fourier_input_mapping(x, B=nothing)
+
+Map the input `x` to a Fourier basis representation using the matrix `B`.
+
+If `B` is `nothing`, the function returns `x` as is.
+Otherwise, the function computes the Fourier projection of `x` onto the basis `B`
+and returns the concatenated sine and cosine components.
+
+# Arguments
+- `x`: The input vector to be mapped.
+- `B`: The Fourier basis matrix. If not provided, defaults to `nothing`.
+
+# Returns
+- If `B` is `nothing`, returns `x` as is.
+- If `B` is provided, returns the concatenated sine and cosine components of the Fourier projection.
+"""
+function fourier_input_mapping(x, B=nothing)
+    if isnothing(B)
+        return x
+    else
+        x_proj = permutedims((2 * π * x)) * B'
+        return hcat(sin.(x_proj), cos.(x_proj))'
+    end
 end

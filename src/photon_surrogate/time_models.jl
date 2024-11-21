@@ -1,6 +1,6 @@
 
 export NNRQNormFlow
-export RQNormFlowHParams, AbsScaRQNormFlowHParams
+export RQNormFlowHParams, AbsScaRQNormFlowHParams, AbsScaRQNormFlowFourierHParams
 export create_model_input!
 
 
@@ -27,11 +27,25 @@ struct NNRQNormFlow <: RQSplineModel
     K::Integer
     range_min::Float64
     range_max::Float64
-    transformations::Vector{Normalizer{Float32}}
+    transformations::Vector{<:Transformation}
 end
 
 # Make embedding parameters trainable
 Flux.@functor NNRQNormFlow (embedding,)
+
+struct NNRQNormFlowFourier <: RQSplineModel
+    embedding::Chain
+    K::Integer
+    range_min::Float64
+    range_max::Float64
+    transformations::Vector{<:Transformation}
+    embedding_matrix::Matrix
+end
+
+# Make embedding parameters trainable
+Flux.@functor NNRQNormFlowFourier (embedding,)
+
+
 
 Base.@kwdef struct RQNormFlowHParams <: HyperParams
     K::Int64 = 10
@@ -67,6 +81,70 @@ Base.@kwdef struct AbsScaRQNormFlowHParams <: HyperParams
     resnet = false
 end
 
+Base.@kwdef struct AbsScaRQNormFlowFourierHParams <: HyperParams
+    K::Int64 = 10
+    batch_size::Int64 = 5000
+    mlp_layers::Int64 = 2
+    mlp_layer_size::Int64 = 512
+    lr::Float64 = 0.001
+    lr_min::Float64 = 1E-5
+    epochs::Int64 = 50
+    dropout::Float64 = 0.1
+    non_linearity::String = "gelu"
+    seed::Int64 = 31338
+    l2_norm_alpha = 0.0
+    adam_beta_1 = 0.9
+    adam_beta_2 = 0.999
+    resnet = false
+    fourier_gaussian_scale = 1.0
+    fourier_mapping_size = 256
+end
+
+
+
+"""
+    setup_model(hparams::AbsScaRQNormFlowFourierHParams)
+
+Create and initialize a model for the arrival time distribution with medium perturbations and gaussian fourier feature mapping.
+
+# Arguments
+- `hparams::AbsScaRQNormFlowFourierHParams`: Hyperparameters for the model.
+- `transformations::AbstractVector{<:Normalizer}`: Feature normalizers.
+
+# Returns
+- `model`: The initialized time prediction model.
+- `log_likelihood`: The log-likelihood function of the model.
+- `embedding_matrix`: The embedding matrix for the fourier features.
+
+"""
+function setup_model(hparams::AbsScaRQNormFlowFourierHParams, transformations::AbstractVector{<:Transformation}, embedding_matrix::Matrix)
+    hidden_structure = fill(hparams.mlp_layer_size, hparams.mlp_layers)
+
+    non_lin = NON_LINS[hparams.non_linearity]
+
+    # 3 K + 1 for spline, 1 for shift, 1 for scale
+    n_spline_params = 3 * hparams.K + 1
+    n_out = n_spline_params + 2
+
+    n_in = 2*hparams.fourier_mapping_size
+
+    embedding = create_mlp_embedding(
+        hidden_structure=hidden_structure,
+        n_in=n_in,
+        n_out=n_out,
+        dropout=hparams.dropout,
+        non_linearity=non_lin,
+        split_final=false)
+
+    model = NNRQNormFlowFourier(embedding, hparams.K, -30.0, 200.0, transformations, embedding_matrix)
+    return model, arrival_time_log_likelihood
+end
+
+function setup_model(hparams::AbsScaRQNormFlowFourierHParams, transformations::AbstractVector{<:Transformation})
+    rand_mat = randn(Float32, (hparams.fourier_mapping_size, 26))  * hparams.fourier_gaussian_scale
+    return setup_model(hparams, transformations, rand_mat)
+end
+
 
 """
     setup_model(hparams::AbsScaRQNormFlowHParams)
@@ -82,11 +160,10 @@ Create and initialize a model for the arrival time distribution with medium pert
 - `log_likelihood`: The log-likelihood function of the model.
 
 """
-function setup_model(hparams::AbsScaRQNormFlowHParams, transformations::AbstractVector{<:Normalizer})
+function setup_model(hparams::AbsScaRQNormFlowHParams, transformations::AbstractVector{<:Transformation})
     hidden_structure = fill(hparams.mlp_layer_size, hparams.mlp_layers)
 
-    non_lins = Dict("relu" => relu, "tanh" => tanh)
-    non_lin = non_lins[hparams.non_linearity]
+    non_lin = NON_LINS[hparams.non_linearity]
 
     # 3 K + 1 for spline, 1 for shift, 1 for scale
     n_spline_params = 3 * hparams.K + 1
@@ -107,6 +184,8 @@ function setup_model(hparams::AbsScaRQNormFlowHParams, transformations::Abstract
     return model, arrival_time_log_likelihood
 end
 
+
+
 """
     setup_model(hparams::RQNormFlowHParams)
 
@@ -121,11 +200,10 @@ Create and initialize a model for the arrival time distribution without medium p
 - `log_likelihood`: The log-likelihood function of the model.
 
 """
-function setup_model(hparams::RQNormFlowHParams, transformations::AbstractVector{<:Normalizer})
+function setup_model(hparams::RQNormFlowHParams, transformations::AbstractVector{<:Transformation})
     hidden_structure = fill(hparams.mlp_layer_size, hparams.mlp_layers)
 
-    non_lins = Dict("relu" => relu, "tanh" => tanh)
-    non_lin = non_lins[hparams.non_linearity]
+    non_lin = NON_LINS[hparams.non_linearity]
 
     # 3 K + 1 for spline, 1 for shift, 1 for scale
     n_spline_params = 3 * hparams.K + 1
