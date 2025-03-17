@@ -13,13 +13,14 @@ export create_input_buffer, create_output_buffer
 export setup_training
 export fourier_input_mapping
 
-using AbstractMediumProperties
+using CherenkovMediumBase
 using ArraysOfArrays
 using Flux
 using Random
 using ProgressLogging
 using PhysicsTools
 using PhotonPropagation
+using NeutrinoTelescopeBase
 using MLUtils
 using ParameterSchedulers
 using ParameterSchedulers: Scheduler, Stateful, next!
@@ -105,7 +106,7 @@ export setup_model
 abstract type SurrogateModel end
 abstract type ArrivalTimeSurrogate <: SurrogateModel end
 abstract type RQSplineModel <: ArrivalTimeSurrogate end
-abstract type AmplitudeSurrogate <: SurrogateModel end
+
 
 
 """
@@ -124,22 +125,7 @@ end
 
 
 abstract type PhotonSurrogate end
-
-
-struct PhotonSurrogateAmplitude{A<:AmplitudeSurrogate} <: PhotonSurrogate
-    model::A
-end
-
-function PhotonSurrogateAmplitude(fname_amp)
-
-    b1 = load(fname_amp)
-    amp_model = b1[:model]
-
-    Flux.testmode!(amp_model)
-
-    return PhotonSurrogateAmplitude(amp_model)
-end
-
+abstract type AmplitudeSurrogate <: SurrogateModel end
 
 """
     struct PhotonSurrogateWithPerturb <: PhotonSurrogate
@@ -1280,10 +1266,7 @@ function create_input_buffer(model::PhotonSurrogate, n_det::Integer, max_particl
     return create_input_buffer(input_size, n_det, max_particles)
 end
 
-function create_input_buffer(model::PhotonSurrogateAmplitude, n_det::Integer, max_particles=500)
-    input_size = size(model.model.embedding.layers[1].weight, 2)
-    return create_input_buffer(input_size, n_det, max_particles)
-end
+
 
 function create_output_buffer(n_det::Integer, expected_hits_per=100)
     buffer = VectorOfArrays{Float64, 1}()

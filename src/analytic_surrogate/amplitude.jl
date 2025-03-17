@@ -65,7 +65,7 @@ struct SRSurrogateModel <: AnalyticSurrogateModel end
 
 
 function _sr_amplitude(energy, distance, theta_pos, theta_dir, phi_dir, abs_scale, sca_scale)
-    return (((energy / 4.088170576530485) ^ 0.8368816007788409) / ((((theta_pos ^ ((theta_pos - (1.4330390227977239 - theta_dir)) * 1.8760043466558647)) / (distance * 0.14914900883519233)) - -0.23508448098889415) ^ (theta_dir - 0.8277027096616162))) / (abs((((exp(distance * 0.11267100122049988) / theta_dir) - (distance * 0.08649012148556141)) / theta_pos) - 0.49242697825019954) + (cosh((sqrt(distance) * -0.3475526750813855) * (theta_pos + 2.2792764022764818)) / ((1.7576410895884482 / (3.148056563571116 - phi_dir)) ^ 2)))
+    return sqrt(((energy + 196.99990115571856) * ((((24.071180505247334 / sqrt((abs(3.1375769542264234 - phi_dir) + (((0.2527566982481768 ^ theta_dir) / 0.1047213870655026) / (theta_pos + (0.05966138001737878 ^ ((theta_pos + 0.26296689034611676) * theta_dir))))) + tanh((((theta_pos * theta_pos) * (theta_dir * -0.16835412713452186)) ^ 2) * 0.7551665125771176))) / (distance - (((theta_dir ^ theta_pos) - -2.0003863609058623) / -0.0860817592408263))) ^ ((theta_pos * 1.552909303464834) + 6.875484398708654)) * 314.1420956231935)) ^ 1.818085535256962)
 end
 
 

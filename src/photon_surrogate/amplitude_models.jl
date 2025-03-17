@@ -1,4 +1,27 @@
 export AbsScaPoissonExpModelParams, PoissonExpModelParams, AbsScaPoissonExpFourierModelParams
+export GNNAmplitudeModel
+export SimpleMLPAmpModel, SimpleMLPAmpModelParams
+export PhotonSurrogateAmplitude
+
+export create_model_input
+
+struct PhotonSurrogateAmplitude{A<:AmplitudeSurrogate} <: PhotonSurrogate
+    model::A
+end
+
+function PhotonSurrogateAmplitude(fname_amp)
+
+    amp_model = load(fname_amp)[:model]
+    Flux.testmode!(amp_model)
+
+    return PhotonSurrogateAmplitude(amp_model)
+end
+
+function create_input_buffer(model::PhotonSurrogateAmplitude, n_det::Integer, max_particles=500)
+    input_size = size(model.model.embedding.layers[1].weight, 2)
+    return create_input_buffer(input_size, n_det, max_particles)
+end
+
 
 
 struct PoissonExpModel <: AmplitudeSurrogate
@@ -230,3 +253,167 @@ function create_model_input!(
     sca_scale)
    return create_model_input!(target_particles_vector, output, model.transformations, abs_scale=abs_scale, sca_scale=sca_scale)
 end
+
+
+
+Base.@kwdef struct SimpleMLPAmpModelParams <: HyperParams
+    n_features::Int64 = 6
+    n_hidden::Int64 = 256
+    dropout::Float64 = 0.0
+    non_linearity::String = "gelu"
+    l2_norm_alpha = 0.0
+    adam_beta_1 = 0.9
+    adam_beta_2 = 0.999
+    resnet = false
+end
+
+struct SimpleMLPAmpModel <: AmplitudeSurrogate
+    model::Chain
+end
+
+function SimpleMLPAmpModel(;n_features=6, n_hidden=1024, non_lin="relu", dropout=0.0)
+    non_lin_lookup = Dict("relu" => NNlib.relu, "tanh" => NNlib.tanh, "sigmoid" => NNlib.sigmoid, "celu" => NNlib.celu, "gelu" => NNlib.gelu, "swish" => NNlib.swish, "selu" => NNlib.selu)
+    non_lin = non_lin_lookup[non_lin]
+    model = Chain(
+        Dense(n_features, n_hidden, non_lin),
+        Dropout(dropout),
+        Dense(n_hidden, n_hidden, non_lin),
+        Dropout(dropout),
+        Dense(n_hidden, n_hidden, non_lin),
+        Dropout(dropout),
+        Dense(n_hidden, 16),
+    )
+
+    return SimpleMLPAmpModel(model)
+end
+
+function SimpleMLPAmpModel(hparams::SimpleMLPAmpModelParams)
+    return SimpleMLPAmpModel(n_features=hparams.n_features, n_hidden=hparams.n_hidden, non_lin=hparams.non_linearity)
+end
+
+# Define a loss function (example: mean squared error)
+function loss(model::SimpleMLPAmpModel, batch)
+
+    preds = model(batch.x)
+    targets = batch.nhits
+    return Flux.mse(preds, targets)
+end
+
+function (m::SimpleMLPAmpModel)(x)
+    return m.model(x)
+end
+
+function (m::SimpleMLPAmpModel)(target_position, particle_pos, particle_dir, particle_energy)
+    input = collect(create_model_input(m, particle_pos, particle_dir, particle_energy, target_position))
+    return m.model(input)
+end
+
+
+function create_model_input(::SimpleMLPAmpModel, particle_pos, particle_dir, particle_energy, target_pos)
+    rel_pos = particle_pos - target_pos
+    dist = norm(rel_pos)
+
+    pos_theta, pos_phi = cart_to_sph(rel_pos ./ dist)
+    dir_theta, dir_phi = cart_to_sph(particle_dir)
+
+    return log10(dist), log10(particle_energy), cos(pos_theta), pos_phi, cos(dir_theta), dir_phi
+end
+
+
+function create_model_input(model::SimpleMLPAmpModel, particle::Particle, target::PhotonTarget)
+    return create_model_input(model, particle.position, particle.direction, particle.energy, target.shape.position)
+end
+
+
+function create_model_input!(
+    model::SimpleMLPAmpModel,
+    particles::AbstractVector{<:Particle},
+    targets::AbstractVector{<:PhotonTarget},
+    output;)
+   
+    out_ix = LinearIndices((eachindex(particles), eachindex(targets)))
+
+    for (p_ix, t_ix) in product(eachindex(particles), eachindex(targets))
+        particle = particles[p_ix]
+        target = targets[t_ix]
+
+        ix = out_ix[p_ix, t_ix]
+
+        outview = @view output[:, ix]
+
+        model_input = create_model_input(model, particle, target)
+        outview .= model_input
+    end
+end
+
+function get_log_amplitudes(particles, targets, model::SimpleMLPAmpModel; feat_buffer, device=gpu)
+
+    n_pmt = get_pmt_count(eltype(targets))
+
+    #TODO: get rid of this
+    input_size = size(model.amp_model.embedding.layers[1].weight, 2)
+
+    amp_buffer = @view feat_buffer[1:input_size, 1:length(targets)*length(particles)]
+    create_model_input!(model, particles, targets, amp_buffer, abs_scale=abs_scale, sca_scale=sca_scale)
+
+    input = amp_buffer
+    input = permutedims(input)'
+
+    log_expec_per_src_trg::Matrix{eltype(input)} = cpu(model.amp_model(device(input)))
+
+    log_expec_per_src_pmt_rs = reshape(
+        log_expec_per_src_trg,
+        n_pmt, length(particles), length(targets))
+
+    log_expec_per_pmt = LogExpFunctions.logsumexp(log_expec_per_src_pmt_rs, dims=2)
+
+    return log_expec_per_pmt, log_expec_per_src_pmt_rs
+end
+
+
+
+#=
+
+struct GNNAmplitudeModel <: AmplitudeSurrogate
+    node_mapping::Chain
+    gnn_model::GNNChain
+    n_features::Int64
+    node_embedding_dim::Int64
+end
+
+function GNNAmplitudeModel(;
+    n_features=6,
+    node_embedding_dim=64,
+    n_nodes=16)
+
+    node_mapping = Chain(
+        Dense(n_features, n_nodes * node_embedding_dim, NNlib.relu),
+        Dense(n_nodes * node_embedding_dim, n_nodes * node_embedding_dim, NNlib.relu),
+        Dense(n_nodes * node_embedding_dim, n_nodes * node_embedding_dim, NNlib.relu),
+    )
+
+    gnn_model = GNNChain(
+        GCNConv(node_embedding_dim => 1, NNlib.relu, add_self_loops=true),
+        #GCNConv(gnn_conv_dim => 1, NNlib.relu,add_self_loops=true),
+    )
+
+    return GNNAmplitudeModel(node_mapping, gnn_model, n_features, node_embedding_dim)
+
+
+end
+Flux.@layer GNNAmplitudeModel
+
+function (m::GNNAmplitudeModel)(batched_graph)
+    global_input = reshape(batched_graph.x, m.n_features, :)
+
+    mapped = m.node_mapping(global_input)
+    # batch dimension is last dimension (n_feat * n_graphs)
+    # reshape features to (n_feat, n_nodes * n_graphs)
+    mapped = reshape(mapped, m.node_embedding_dim, :)
+
+    pred = m.gnn_model(batched_graph, mapped)
+
+
+    return pred
+end
+=#
