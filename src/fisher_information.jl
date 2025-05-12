@@ -46,6 +46,8 @@ function calculate_fisher_matrix!(m::SRSurrogateModel, fisher_matrix, mod_pos, p
 
         @views grd = DiffResults.gradient(diff_res)[4:end]
         pred = DiffResults.value(diff_res)
+
+        pred = clamp(pred, 1E-9)
         
 
         total_pred += pred

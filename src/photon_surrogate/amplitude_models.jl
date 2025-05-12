@@ -264,26 +264,39 @@ Base.@kwdef struct SimpleMLPAmpModelParams <: HyperParams
     l2_norm_alpha = 0.0
     adam_beta_1 = 0.9
     adam_beta_2 = 0.999
-    resnet = false
+    use_skip = false
 end
 
 struct SimpleMLPAmpModel <: AmplitudeSurrogate
     model::Chain
 end
 
-function SimpleMLPAmpModel(;n_features=6, n_hidden=1024, non_lin="relu", dropout=0.0)
+Flux.@layer SimpleMLPAmpModel trainable=(model,)
+
+function SimpleMLPAmpModel(;n_features=6, n_hidden=1024, non_lin="relu", dropout=0.0, use_skip=false)
     non_lin_lookup = Dict("relu" => NNlib.relu, "tanh" => NNlib.tanh, "sigmoid" => NNlib.sigmoid, "celu" => NNlib.celu, "gelu" => NNlib.gelu, "swish" => NNlib.swish, "selu" => NNlib.selu)
     non_lin = non_lin_lookup[non_lin]
-    model = Chain(
-        Dense(n_features, n_hidden, non_lin),
-        Dropout(dropout),
-        Dense(n_hidden, n_hidden, non_lin),
-        Dropout(dropout),
-        Dense(n_hidden, n_hidden, non_lin),
-        Dropout(dropout),
-        Dense(n_hidden, 16),
-    )
-
+    if use_skip
+        model = Chain(
+            Dense(n_features, n_hidden, non_lin),
+            Dropout(dropout),
+            SkipConnection(Dense(n_hidden, n_hidden, non_lin), +),
+            Dropout(dropout),
+            SkipConnection(Dense(n_hidden, n_hidden, non_lin), +),
+            Dropout(dropout),
+            Dense(n_hidden, 16),
+        )
+    else
+        model = Chain(
+            Dense(n_features, n_hidden, non_lin),
+            Dropout(dropout),
+            Dense(n_hidden, n_hidden, non_lin),
+            Dropout(dropout),
+            Dense(n_hidden, n_hidden, non_lin),
+            Dropout(dropout),
+            Dense(n_hidden, 16),
+        )
+    end
     return SimpleMLPAmpModel(model)
 end
 
@@ -351,15 +364,15 @@ function get_log_amplitudes(particles, targets, model::SimpleMLPAmpModel; feat_b
     n_pmt = get_pmt_count(eltype(targets))
 
     #TODO: get rid of this
-    input_size = size(model.amp_model.embedding.layers[1].weight, 2)
+    input_size = size(model.model.layers[1].weight, 2)
 
     amp_buffer = @view feat_buffer[1:input_size, 1:length(targets)*length(particles)]
-    create_model_input!(model, particles, targets, amp_buffer, abs_scale=abs_scale, sca_scale=sca_scale)
+    create_model_input!(model, particles, targets, amp_buffer)
 
     input = amp_buffer
     input = permutedims(input)'
 
-    log_expec_per_src_trg::Matrix{eltype(input)} = cpu(model.amp_model(device(input)))
+    log_expec_per_src_trg::Matrix{eltype(input)} = cpu(model.model(device(input)))
 
     log_expec_per_src_pmt_rs = reshape(
         log_expec_per_src_trg,
