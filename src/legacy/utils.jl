@@ -99,12 +99,11 @@ end
 
 
 export ArrivalTimeSurrogate, RQSplineModel
-export PhotonSurrogate, PhotonSurrogateWithPerturb, PhotonSurrogateWithoutPerturb
+export PhotonSurrogateWithPerturb, PhotonSurrogateWithoutPerturb
 export HyperParams
 export setup_model
 
-abstract type SurrogateModel end
-abstract type ArrivalTimeSurrogate <: SurrogateModel end
+
 abstract type RQSplineModel <: ArrivalTimeSurrogate end
 
 
@@ -123,9 +122,7 @@ function (m::RQSplineModel)(x, cond)
 end
 
 
-
-abstract type PhotonSurrogate end
-abstract type AmplitudeSurrogate <: SurrogateModel end
+abstract type PhotonSurrogateAmpTime <: AbstractPhotonSurrogateModel
 
 """
     struct PhotonSurrogateWithPerturb <: PhotonSurrogate
@@ -136,7 +133,7 @@ PhotonSurrogateWithPerturb is a struct that represents a photon surrogate model 
 - `amp_model::AmplitudeSurrogate`: The amplitude model of the surrogate.
 - `time_model::ArrivalTimeSurrogate`: The time model of the surrogate.
 """
-struct PhotonSurrogateWithPerturb{A<:AmplitudeSurrogate, T<:ArrivalTimeSurrogate} <: PhotonSurrogate
+struct PhotonSurrogateWithPerturb{A<:AmplitudeSurrogate, T<:ArrivalTimeSurrogate} <: PhotonSurrogateAmpTime
     amp_model::A
     time_model::T
 end
@@ -150,7 +147,7 @@ The `PhotonSurrogateWithoutPerturb` struct represents a photon surrogate model w
 - `amp_model::AmplitudeSurrogate`: The amplitude model for the surrogate.
 - `time_model::ArrivalTimeSurrogate`: The time model for the surrogate.
 """
-struct PhotonSurrogateWithoutPerturb{A<:AmplitudeSurrogate, T<:ArrivalTimeSurrogate} <: PhotonSurrogate
+struct PhotonSurrogateWithoutPerturb{A<:AmplitudeSurrogate, T<:ArrivalTimeSurrogate} <: PhotonSurrogateAmpTime
     amp_model::A
     time_model::T
 end
@@ -193,8 +190,8 @@ function PhotonSurrogate(fname_amp, fname_time)
     return mtype(b1[:model], time_model)
 end
 
-Flux.gpu(s::T) where {T <: PhotonSurrogate} = T(gpu(s.amp_model), gpu(s.time_model))
-Flux.cpu(s::T) where {T <: PhotonSurrogate} = T(cpu(s.amp_model), cpu(s.time_model))
+Flux.gpu(s::T) where {T <: PhotonSurrogateAmpTime} = T(gpu(s.amp_model), gpu(s.time_model))
+Flux.cpu(s::T) where {T <: PhotonSurrogateAmpTime} = T(cpu(s.amp_model), cpu(s.time_model))
 
 abstract type HyperParams end
 
@@ -917,7 +914,7 @@ Returns:
     -log_expec_per_pmt: Log of expected photons per pmt. Shape: [n_pmt, 1, n_targets]
     -log_expec_per_src_pmt_rs: Log of expected photons per pmt and per particle. Shape [n_pmt, n_particles, n_targets]
 """
-function get_log_amplitudes(particles, targets, model::PhotonSurrogate; feat_buffer, device=gpu, abs_scale, sca_scale)
+function get_log_amplitudes(particles, targets, model::PhotonSurrogateAmpTime; feat_buffer, device=gpu, abs_scale, sca_scale)
 
     n_pmt = get_pmt_count(eltype(targets))
 
@@ -944,7 +941,7 @@ end
 
 function get_log_amplitudes(
     target_particles_vector::Vector{Tuple{T, Vector{Particle}}},
-    model::PhotonSurrogate;
+    model::PhotonSurrogateAmpTime;
     feat_buffer,
     device=gpu,
     abs_scale,
@@ -1008,7 +1005,7 @@ function evaluate_model(
     particles::AbstractVector{<:Particle};
     data,
     targets,
-    model::PhotonSurrogate,
+    model::PhotonSurrogateAmpTimeAmpTime,
     medium,
     feat_buffer=nothing,
     device=gpu,
@@ -1190,7 +1187,7 @@ end
     multi_particle_likelihood(particles::AbstractVector{<:Particle};
                              data::AbstractVector{<:AbstractVector{<:Real}},
                              targets::AbstractVector{<:PhotonTarget},
-                             model::PhotonSurrogate,
+                             model::PhotonSurrogateAmpTime,
                              medium::MediumProperties;
                              feat_buffer=nothing,
                              amp_only=false,
@@ -1219,7 +1216,7 @@ function multi_particle_likelihood(
     particles::AbstractVector{<:Particle};
     data::AbstractVector{<:AbstractVector{<:Real}},
     targets::AbstractVector{<:PhotonTarget},
-    model::PhotonSurrogate,
+    model::PhotonSurrogateAmpTime,
     medium::MediumProperties,
     feat_buffer=nothing,
     amp_only=false,
@@ -1261,7 +1258,7 @@ function create_input_buffer(input_size::Integer, n_det::Integer, max_particles=
     return zeros(Float32, input_size, n_det*max_particles)
 end
 
-function create_input_buffer(model::PhotonSurrogate, n_det::Integer, max_particles=500)
+function create_input_buffer(model::PhotonSurrogateAmpTime, n_det::Integer, max_particles=500)
     input_size = size(model.time_model.embedding.layers[1].weight, 2)
     return create_input_buffer(input_size, n_det, max_particles)
 end

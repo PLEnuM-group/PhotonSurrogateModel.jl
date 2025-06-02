@@ -15,23 +15,62 @@ using Distributions
 using DiffResults
 using ForwardDiff
 using Optimisers
+using StatsBase
+using Rotations
 
-amp_model = BSON.load("/home/wecapstor3/capn/capn100h/simple_mlp_amp_model.bson")[:model]
-feat_buffer = zeros(Float32, 6, 100)
+hbc, hbg = make_hit_buffers(Float32, 0.3);
 
-dir_ct = 0.2
+
+dir_ct = 0.6
 dir_phis = 0:0.01:2π
 target = POM(SA[0., 0., 0.], 1);
 
-amps = []
+g = 0.95f0
+pwf = 0.2f0
+abs_scale = 1f0
+sca_scale = 1f0
+medium = CascadiaMediumProperties(g, pwf, abs_scale, sca_scale)
+wl_range = (300.0f0, 800.0f0)
+spectrum = make_cherenkov_spectrum(wl_range, medium)
+seed = 1
+sim_amps = []
 
+target_f32 = convert(POM{Float32}, target)
+for (nsim, dir_phi) in enumerate(dir_phis[1:10:end])
+    pdir = sph_to_cart(acos(dir_ct), dir_phi)
+    particle = Particle(SA_F32[10., 20, 10], Float32.(pdir), 0f0, Float32(4E4), 0f0, PEMinus)
+    source = ExtendedCherenkovEmitter(particle, medium, spectrum)
+    
+    setup = PhotonPropSetup([source], [target_f32], medium, spectrum, seed+nsim)
+    photons = propagate_photons(setup, hbc, hbg, copy_output=true)
+    hits = make_hits_from_photons(photons, setup, RotMatrix3(I))
+    calc_pe_weight!(hits, [target])
+    ws = Weights(hits.total_weight)
+    per_pmt_counts = counts(Int64.(hits.pmt_id), 1:16, ws)
+    push!(sim_amps, per_pmt_counts)
+end
+
+
+amp_model = BSON.load("/home/wecapstor3/capn/capn100h/simple_mlp_amp_model.bson")[:model]
+surrogate_ana = AnalyticAmplitudeSurrogate(Vector((sph_to_cart.(eachcol(make_pom_pmt_coordinates(Float64))))))
+
+
+amps_mlp = []
+amps_ana = []
 for dir_phi in dir_phis
     pdir = sph_to_cart(acos(dir_ct), dir_phi)
-    particle = Particle(SA[0., 10, 0], pdir, 0., 4E3, 0., PEMinus)
-    log_amps = get_log_amplitudes([particle], [target], amp_model, feat_buffer=feat_buffer, device=cpu)
-    push!(amps, exp.(log_amps[1]))
+    particle = Particle(SA[0., 20, 0], pdir, 0., 4E3, 0., PEMinus)
+    log_amps = get_log_amplitudes(amp_model, [particle], [target], )
+    push!(amps_mlp, exp.(log_amps[1]))
+
+    log_amps = get_log_amplitudes(surrogate_ana, [particle], [target], )
+    push!(amps_ana, exp.(log_amps[1]))
 end
-    
+
+
+
+
+
 fig = Figure(size=(1000, 1000))
 axes = []
 for pmt_ix in 1:16
@@ -42,8 +81,12 @@ end
 
 
 for pmt_ix in 1:16
-    this_amps = [a[pmt_ix] for a in amps]
+    this_amps = [a[pmt_ix] for a in amps_mlp]
+    this_ana_amps = [a[pmt_ix] for a in amps_ana]
+    this_sim_amps = [a[pmt_ix] for a in sim_amps]
+    lines!(axes[pmt_ix], dir_phis, this_ana_amps)
     lines!(axes[pmt_ix], dir_phis, this_amps)
+    lines!(axes[pmt_ix], dir_phis[1:10:end], this_sim_amps)
 end
 fig
 

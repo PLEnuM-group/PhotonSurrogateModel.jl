@@ -63,34 +63,6 @@ function calculate_fisher_matrix!(m::SRSurrogateModel, fisher_matrix, mod_pos, p
     return fisher_matrix, total_pred
 end
 
-function calculate_fisher_matrix!(model::SimpleMLPAmpModel, fisher_matrix, mod_pos, pmt_directions, particle_pos, particle_dir, log10_particle_energy, diff_res)
-    pos_x, pos_y, pos_z = particle_pos
-    dir_theta, dir_phi = cart_to_sph(particle_dir)
-
-   
-    function eval_model(x)
-        @views input = create_model_input(model, x[1:3], sph_to_cart(x[4], x[5]), 10^x[6], mod_pos)
-        return 10 .^model(collect(input))
-    end
-
-    jac_conf = ForwardDiff.JacobianConfig(eval_model, [pos_x, pos_y, pos_z, dir_theta, dir_phi, log10_particle_energy], ForwardDiff.Chunk(6))
-
-      
-    ForwardDiff.jacobian!(
-        diff_res,
-        eval_model,
-        [pos_x, pos_y, pos_z, dir_theta, dir_phi, log10_particle_energy],
-        jac_conf)
-
-    jac = DiffResults.jacobian(diff_res)
-    model_eval = DiffResults.value(diff_res)
-
-        
-    grad_mat = reshape(jac, 16, 6, 1) .* reshape(jac, 16, 1, 6)
-
-    fisher_matrix .+= dropdims(sum(1 ./ model_eval .* grad_mat, dims=1), dims=1)
-    return fisher_matrix, model_eval
-end
 
 
 

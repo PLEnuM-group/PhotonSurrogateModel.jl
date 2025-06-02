@@ -9,6 +9,7 @@ export create_diff_result
 using ForwardDiff
 using SymbolicUtils
 using NaNMath
+
 noNaNs(x::Real) = true
 noNaNs(x::ForwardDiff.Dual) = !any(isnan, ForwardDiff.partials(x))
 
@@ -59,7 +60,7 @@ function convert_pmt_frame(pmt_direction::AbstractVector, particle_pos::Abstract
 end
 
 
-abstract type AnalyticSurrogateModel end
+abstract type AnalyticSurrogateModel <: AbstractPhotonSurrogateModel end
 
 struct SRSurrogateModel <: AnalyticSurrogateModel end
 

@@ -18,56 +18,84 @@ using Base.Iterators
 using ParameterSchedulers
 using PhysicsTools
 using CairoMakie
-
+using PoissonRandom
 using CUDA
 CUDA.versioninfo()
 
+function log_poisson_loss(model, x, y)
+    logpreds = model(x)
+    logtargets = y
+
+    preds = 10f0 .^logpreds
+    targets = 10f0 .^logtargets
+
+    lpl = .-preds .+ targets .* logpreds
+    return - mean(lpl)
+end
+
+
+
 target = POM(SA[0., 0., 0.], 1)
 
-pmt_pos = get_pmt_positions(target, RotMatrix3(I))
-ang_dists = dot.(permutedims(pmt_pos), permutedims(pmt_pos)')
+#pmt_pos = get_pmt_positions(target, RotMatrix3(I))
+#ang_dists = dot.(permutedims(pmt_pos), permutedims(pmt_pos)')
 
-files = glob("*.arrow", "/home/wecapstor3/capn/capn100h/snakemake/photon_tables_for_sr/results/em_shower/")
+files = glob("*.arrow", "/home/wecapstor3/capn/capn100h/snakemake/photon_tables_for_sr_randomized/results/em_shower/")
 df = DataFrame(Arrow.Table(files))
 
-no_gnn_model = SimpleMLPAmpModel(n_features=6, n_hidden=256, non_lin="gelu", dropout=0, use_skip=true)
+no_gnn_model = SimpleMLPAmpModel(n_features=512, n_hidden=512, non_lin="relu", dropout=0.15, use_skip=false)
 all_data = []
 
 for row in eachrow(df)
     #g = GNNGraph(ang_dists, ndata=(;nhits=log10.(row.hits.+1E-9)), gdata=(;x=[log10(row.dist), log10(row.energy), cos(pos_t), pos_phi, cos(row.dir_t), row.dir_phi]))
     #push!(all_graphs, g)
 
-    x = create_model_input(no_gnn_model, row.pos, row.dir, row.energy, [0, 0, 0])
-    push!(all_data, (nhits=log10.(row.hits.+1E-9), x=Float32.(collect(x))))
+    x = Float32.(collect(create_model_input(no_gnn_model, row.pos, row.dir, row.energy, [0, 0, 0])))
+
+    #x = fourier_input_mapping(x, mapping_matrix)[:]
+
+    push!(all_data, (nhits=log10.(row.hits.+1E-9), x=x))
 end
 
 
-
-device = gpu
+devi = gpu
 
 train_data, test_data = MLUtils.splitobs(all_data, at=0.8, shuffle=true)
-train_loader = DataLoader(train_data, batchsize=1024, shuffle=true, collate=true)
-test_loader = DataLoader(test_data, batchsize=1024, shuffle=false, collate=true)
+train_loader = DataLoader(train_data, batchsize=128, shuffle=true, collate=true)
+test_loader = DataLoader(test_data, batchsize=128, shuffle=false, collate=true)
 
-no_gnn_model = no_gnn_model |> device
+no_gnn_model = SimpleMLPAmpModel(n_features=6, n_hidden=128, non_lin="tanh", dropout=0.15, use_skip=true, fourier_embedding_dim=128, n_layers=4)
 
-no_gnn_model.model.layers[1].weight
+no_gnn_model = no_gnn_model |> devi
 
-opt_state = Flux.setup(Adam(5E-4), no_gnn_model)
+lr = 5E-4
+opt_state = Flux.setup(Adam(lr), no_gnn_model)
 
-sched = ParameterSchedulers.Stateful(Sequence(5E-4 => 150, 2E-4 => 50, 1E-4 => 50))
 
-logger = TBLogger("/home/wecapstor3/capn/capn100h/tensorboard/no_gnn_surrogate", tb_increment)
+#sched = ParameterSchedulers.Stateful(Sequence(2E-4 => 75, 1E-4 => 75))
+sched = ParameterSchedulers.Stateful(ParameterSchedulers.Constant(lr))
+sched = ParameterSchedulers.Stateful(ParameterSchedulers.Exp(lr, 0.98))
 
-for epoch in 1:250
+
+
+
+logger = TBLogger("/home/wecapstor3/capn/capn100h/tensorboard/no_gnn_surrogate_randomized_prod", tb_increment)
+
+for epoch in 1:100
     train_loss = 0
     Flux.adjust!(opt_state, ParameterSchedulers.next!(sched))
     Flux.trainmode!(no_gnn_model)
     for batch in train_loader
     
-        batch = batch |> device
+        batch = batch |> devi
         
         tloss, grads = Flux.withgradient(no_gnn_model) do m
+
+            #preds = m(batch.x)
+            #targets = batch.nhits
+
+            #return log_poisson_loss(m, batch.x, batch.nhits)
+
             Flux.mse(m(batch.x), batch.nhits)
         end
 
@@ -79,8 +107,9 @@ for epoch in 1:250
     Flux.testmode!(no_gnn_model)
     test_loss = 0
     for batch in test_loader
-        batch = batch |> gpu
+        batch = batch |> devi
         test_loss += cpu( Flux.mse(no_gnn_model(batch.x), batch.nhits))
+        #test_loss += cpu(log_poisson_loss(no_gnn_model, batch.x, batch.nhits))
     end
 
     train_loss /= length(train_loader)
@@ -97,7 +126,16 @@ for epoch in 1:250
     @info "Epoch $epoch complete. Test loss: $test_loss"
 end
 
+Flux.testmode!(no_gnn_model)
 BSON.bson("/home/wecapstor3/capn/capn100h/simple_mlp_amp_model.bson", model=cpu(no_gnn_model))
+
+fig = Figure()
+ax = Axis(fig[1, 1])
+hist!(ax, cpu(no_gnn_model.fourier_embedding)[:], bins=-1:0.01:1)
+hist!(ax, embed_mat_start[:], bins=-1:0.01:1)
+fig
+
+no_gnn_model = BSON.load("/home/wecapstor3/capn/capn100h/simple_mlp_amp_model.bson")[:model] |> gpu
 
 
 g = 0.95f0
@@ -109,14 +147,14 @@ target = POM(SA_F32[0, 0, 0], UInt16(1))
 wl_range = (300.0f0, 800.0f0)
 spectrum = make_cherenkov_spectrum(wl_range, medium)
 
-pos_theta = 1.2f0
-pos_phi = 0.5f0
+pos_theta = 0.5f0
+pos_phi = 1.5f0
 
-dist = 40f0
+dist = 20f0
 
 
 dir_theta = 0.7f0
-dir_phi = 1.3f0
+dir_phi = 2.3f0
 dir = sph_to_cart(dir_theta, dir_phi)
 energy = 3E4
 
@@ -155,6 +193,7 @@ for dir_phi in dir_phis
 
     model_input = collect(create_model_input(no_gnn_model, particle, target))
 
+
     model_eval = cpu(no_gnn_model(model_input |> gpu))
 
     push!(results, (per_pmt_counts,model_eval))
@@ -175,28 +214,36 @@ fig
 
 #7E-2, 5E-2, 1E-2
 #"relu", "tanh", "sigmoid", "celu", "gelu", 
-for (use_skip, non_lin, lr, embed_dim, dropout) in product([true, false], ["relu", "gelu"], [1E-4, 5E-4, 1E-3, 5E-3, 1E-2], [256, 512, 768, 1024], [0, 0.1, 0.1, 0.3, 0.5])
+for (use_skip, non_lin, lr, embed_dim, dropout) in product([true, false], ["relu", "gelu"], [1E-4, 2E-4, 3E-4], [512, 768], [0.15, 0.2, 0.25])
+#for (use_skip, non_lin, lr, embed_dim, embed_layers, dropout) in product([true], ["relu"], [1E-4, 2E-4, 3E-4, 5E-4], [64, 128, 264], [3, 4, 5, 6], [0.1, 0.15, 0.2])
 
     hparams = Dict(
         "lr" => lr,
         "hidden_dim" => embed_dim,
         "non_lin" => non_lin,
         "dropout" => dropout,
-        "use_skip" => use_skip
+        "use_skip" => use_skip,
+        "n_layers" => embed_layers
     )
 
-    model = SimpleMLPAmpModel(n_features=6, n_hidden=hparams["hidden_dim"], non_lin=hparams["non_lin"], dropout=hparams["dropout"], use_skip=hparams["use_skip"])
-    model = model |> device
+    model = SimpleMLPAmpModel(
+        n_features=6,
+        n_hidden=hparams["hidden_dim"],
+        non_lin=hparams["non_lin"],
+        dropout=hparams["dropout"],
+        use_skip=hparams["use_skip"],
+        n_layers=hparams["n_layers"])
+    model = model |> gpu
     opt_state = Flux.setup(Adam(hparams["lr"]), model)
 
-    logger = TBLogger("/home/wecapstor3/capn/capn100h/tensorboard/no_gnn_surrogate", tb_increment)
+    logger = TBLogger("/home/wecapstor3/capn/capn100h/tensorboard/no_gnn_surrogate_deep", tb_increment)
 
-    for epoch in 1:150
+    for epoch in 1:120
         train_loss = 0
         Flux.trainmode!(model)
         for batch in train_loader
         
-            batch = batch |> device
+            batch = batch |> gpu
             
             tloss, grads = Flux.withgradient(model) do m
                 Flux.mse(m(batch.x), batch.nhits)
@@ -226,10 +273,15 @@ for (use_skip, non_lin, lr, embed_dim, dropout) in product([true, false], ["relu
         # Optionally, evaluate on a validation/test set
         # (similar procedure for batching and computing loss)
         @info "Epoch $epoch complete. Test loss: $test_loss"
+        
     end
     write_hparams!(logger, hparams, ["test/loss"])
 end
 
+
+all_data_df = DataFrame(all_data)
+
+expected_loss = mean((log10.(pois_rand.(10 .^(all_data_df[:nhits]))) .- log10.(all_data_df[:nhits])) .^2)
 
 train_graphs, test_graphs = MLUtils.splitobs(all_graphs, at=0.8)
 train_loader = DataLoader(train_graphs, batchsize=256, shuffle=true, collate=true)
